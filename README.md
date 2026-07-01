@@ -13,9 +13,39 @@ This package uses Circle Gateway batched x402 flow: seller returns HTTP `402` wi
 - Single payment and batch payment.
 - Policy caps: daily budget, max single payment, max batch payment, host allowlist, HTTPS requirement.
 
-## Install / verify
+## Install
+
+This package is not published to npm/PyPI yet.
+
+Install the TypeScript package directly from GitHub:
 
 ```bash
+npm install github:riyannode/x402-header-agent
+```
+
+For reproducible installs, pin a commit:
+
+```bash
+npm install github:riyannode/x402-header-agent#<commit-sha>
+```
+
+Install the native Python package directly from the repo subdirectory:
+
+```bash
+pip install "git+https://github.com/riyannode/x402-header-agent.git#subdirectory=python"
+```
+
+Python import:
+
+```python
+from x402_arc_sdk import X402ArcClient
+```
+
+## Local verification
+
+```bash
+git clone https://github.com/riyannode/x402-header-agent.git
+cd x402-header-agent
 npm install
 npm run typecheck
 npm test
@@ -23,7 +53,7 @@ npm run build
 npm audit --audit-level=moderate
 ```
 
-Python:
+Python local verification:
 
 ```bash
 cd python
@@ -157,14 +187,15 @@ Use `X402_ALLOW_LOCALHOST=true` only for local validation. Public production end
 
 ## Package names
 
-- NPM: `x402-header-agent`
-- Python: `x402-header-agent`
+- TypeScript package name: `x402-header-agent`
+- Python package name: `x402-header-agent`
 - Python import: `from x402_arc_sdk import X402ArcClient`
+- Distribution status: not published to npm/PyPI yet; install from GitHub.
 
 ## Security
 
 - No buyer raw private key env or code path.
 - TypeScript signs through Circle DCW JS SDK.
 - Python signs through Circle DCW REST `signTypedData` using `CIRCLE_ENTITY_SECRET`.
-- Do not log `CIRCLE_ENTITY_SECRET`, `CIRCLE_ENTITY_SECRET`, raw signatures, or full `Payment-Signature`.
+- Do not log `CIRCLE_ENTITY_SECRET`, raw signatures, full `Payment-Signature`, API keys, wallet IDs, or payment payloads.
 - DCW buyer must be EOA-compatible for Gateway offchain signature verification.
