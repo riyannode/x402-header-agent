@@ -6,7 +6,7 @@ export const DEFAULT_POLICY: PaymentPolicyConfig = {
   dailyBudgetUsdc: "10",
   maxSinglePaymentUsdc: "1",
   maxBatchPaymentUsdc: "5",
-  hostAllowlist: ["*"],
+  hostAllowlist: [],
   requireHttps: true,
   allowLocalhost: false,
   requireGatewayBatching: true,

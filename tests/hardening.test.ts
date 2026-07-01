@@ -7,7 +7,7 @@ import { getCrewAIStyleBuyerTools } from "../src/adapters/crewai.js";
 
 function stubBuyer(): BuyerBatchAgent & any {
   const buyer = Object.create(BuyerBatchAgent.prototype) as BuyerBatchAgent & any;
-  buyer.policy = new PaymentPolicy({ dailyBudgetUsdc: "10", maxSinglePaymentUsdc: "10", maxBatchPaymentUsdc: "10" });
+  buyer.policy = new PaymentPolicy({ dailyBudgetUsdc: "10", maxSinglePaymentUsdc: "10", maxBatchPaymentUsdc: "10", hostAllowlist: ["*"] });
   buyer.address = "0x0000000000000000000000000000000000000001";
   buyer.ledger = new InMemorySpendLedger();
   buyer.ensureGatewayBalance = async () => ({ walletUsdc: "10", gatewayAvailableUsdc: "10" });

@@ -211,7 +211,7 @@ class X402Policy:
 
     def __post_init__(self) -> None:
         if self.host_allowlist is None:
-            self.host_allowlist = ["*"]
+            self.host_allowlist = []
         self.daily_budget_usdc = _normalize_usdc(self.daily_budget_usdc)
         self.max_single_payment_usdc = _normalize_usdc(self.max_single_payment_usdc)
         self.max_batch_payment_usdc = _normalize_usdc(self.max_batch_payment_usdc)
@@ -480,7 +480,7 @@ class X402ArcClient:
     @classmethod
     def from_env(cls) -> "X402ArcClient":
         allow_localhost = os.environ.get("X402_ALLOW_LOCALHOST", "false").lower() == "true"
-        allowlist = [x.strip() for x in os.environ.get("X402_HOST_ALLOWLIST", "*").split(",") if x.strip()]
+        allowlist = [x.strip() for x in os.environ.get("X402_HOST_ALLOWLIST", "").split(",") if x.strip()]
         policy = X402Policy(
             daily_budget_usdc=os.environ.get("X402_DAILY_BUDGET_USDC", "10"),
             max_single_payment_usdc=os.environ.get("X402_MAX_SINGLE_PAYMENT_USDC", "1"),
@@ -713,4 +713,10 @@ def _safe_body(response: httpx.Response) -> str:
         text = json.dumps(data)
     except Exception:
         text = response.text
-    return text[:500].replace("Payment-Signature", "Payment-Signature[redacted]")
+    text = text[:500]
+    text = text.replace("Payment-Signature", "Payment-Signature[redacted]")
+    text = text.replace("x-payment", "x-payment[redacted]")
+    text = text.replace("PAYMENT-SIGNATURE", "PAYMENT-SIGNATURE[redacted]")
+    import re as _re
+    text = _re.sub(r"eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}", "[redacted-jwt]", text)
+    return text
