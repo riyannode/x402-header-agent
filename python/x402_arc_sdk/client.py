@@ -713,10 +713,29 @@ def _safe_body(response: httpx.Response) -> str:
         text = json.dumps(data)
     except Exception:
         text = response.text
+
     text = text[:500]
-    text = text.replace("Payment-Signature", "Payment-Signature[redacted]")
-    text = text.replace("x-payment", "x-payment[redacted]")
-    text = text.replace("PAYMENT-SIGNATURE", "PAYMENT-SIGNATURE[redacted]")
     import re as _re
-    text = _re.sub(r"eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}", "[redacted-jwt]", text)
+
+    # Redact header-like echoed values.
+    text = _re.sub(
+        r"(?i)(payment-signature|x-payment|payment-response)\s*[:=]\s*[A-Za-z0-9+/=_-]{20,}",
+        r"\1: [redacted]",
+        text,
+    )
+
+    # Redact JSON key values if a seller echoes headers/body as JSON.
+    text = _re.sub(
+        r'(?i)("?(payment-signature|x-payment|payment-response)"?\s*:\s*")([^"]{20,})(")',
+        r'\1[redacted]\4',
+        text,
+    )
+
+    # Redact JWT-like values too.
+    text = _re.sub(
+        r"eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}(?:\.[A-Za-z0-9_-]{10,})?",
+        "[redacted-jwt]",
+        text,
+    )
+
     return text
