@@ -1,0 +1,10 @@
+node_modules
+dist
+.env
+.x402-ledger.json
+coverage
+.DS_Store
+python/.venv
+**/__pycache__
+**/*.pyc
+**/*.egg-info
