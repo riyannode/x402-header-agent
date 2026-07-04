@@ -156,6 +156,34 @@ mountPaidJsonRoute(app, "get", "/premium-data", seller, { priceUsdc: "0.001" }, 
 app.listen(3000);
 ```
 
+## Dual-role agent
+
+Use `DualRoleAgent` when one service needs to receive an x402 payment first, then spend from a separate buyer wallet to downstream paid services. The seller wallet receives payment for the route. The buyer wallet pays downstream resources from inside the verified handler. These wallets must be different.
+
+`DualRoleAgent` is only a composition wrapper over `SellerBatchAgent` and `BuyerBatchAgent`. It does not change Circle DCW signing, seller settlement, policy caps, or host allowlist behavior.
+
+```ts
+import { DualRoleAgent } from "x402-header-agent";
+
+const agent = new DualRoleAgent({
+  seller: { sellerAddress: "0xSELLER..." },
+  buyer: buyerConfigFromEnv(),
+});
+
+// Express route: receive x402 payment, then spend to a downstream resource
+const [middleware, controller] = agent.paidJsonRouteWithSpend(
+  { priceUsdc: "0.01" },
+  async (spend, req, payment) => {
+    // payment verified — seller received funds
+    // spend() calls buyer.payResource() from the buyer wallet
+    const downstream = await spend({ url: "https://backend.example.com/data" });
+    return { paidBy: payment.payer, downstream: downstream.data };
+  },
+);
+```
+
+> **Note:** Seller and buyer wallets must be different addresses. The constructor throws `ConfigurationError` if they match.
+
 ## Live validation
 
 ```bash
