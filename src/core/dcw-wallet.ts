@@ -60,10 +60,28 @@ function redactError(error: unknown): string {
 }
 
 export function toCircleTypedDataJson(params: Eip712SignParams): string {
-  return JSON.stringify(params, (_key, value) => {
-    if (typeof value === "bigint") return value.toString();
-    return value;
-  });
+  const typesWithDomain: Record<string, Array<{ name: string; type: string }>> =
+    params.types.EIP712Domain
+      ? params.types
+      : {
+          EIP712Domain: [
+            { name: "name", type: "string" },
+            { name: "version", type: "string" },
+            { name: "chainId", type: "uint256" },
+            { name: "verifyingContract", type: "address" },
+          ],
+          ...params.types,
+        };
+
+  return JSON.stringify(
+    {
+      types: typesWithDomain,
+      primaryType: params.primaryType,
+      domain: params.domain,
+      message: params.message,
+    },
+    (_key, value) => (typeof value === "bigint" ? value.toString() : value),
+  );
 }
 
 export class CircleDcwWallet {
