@@ -3,6 +3,9 @@ package-lock.json
 .env
 *.log
 .x402-ledger.json
+.x402-ledger.json.lock
+**/.x402-ledger.json
+**/.x402-ledger.json.lock
 **/__pycache__/
 **/*.pyc
 **/*.pyo
