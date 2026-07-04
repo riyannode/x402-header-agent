@@ -20,7 +20,11 @@
     "!python/build",
     "!python/dist",
     "!python/.venv",
-    "!python/**/.venv"
+    "!python/**/.venv",
+    "!python/.x402-ledger.json",
+    "!python/.x402-ledger.json.lock",
+    "!**/.x402-ledger.json",
+    "!**/.x402-ledger.json.lock"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
