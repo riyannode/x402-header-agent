@@ -8,6 +8,7 @@ export * from "./core/seller.js";
 export * from "./agents/buyer-agent.js";
 export * from "./agents/seller-agent.js";
 export * from "./agents/batch-orchestrator.js";
+export * from "./agents/dual-role-agent.js";
 export * from "./adapters/plain-functions.js";
 export * from "./adapters/openai-tools.js";
 export * from "./middleware/express.js";
