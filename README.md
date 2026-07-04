@@ -163,10 +163,14 @@ Use `DualRoleAgent` when one service needs to receive an x402 payment first, the
 `DualRoleAgent` is only a composition wrapper over `SellerBatchAgent` and `BuyerBatchAgent`. It does not change Circle DCW signing, seller settlement, policy caps, or host allowlist behavior.
 
 ```ts
-import { DualRoleAgent } from "x402-header-agent";
+import {
+  DualRoleAgent,
+  buyerConfigFromEnv,
+  sellerConfigFromEnv,
+} from "x402-header-agent";
 
 const agent = new DualRoleAgent({
-  seller: { sellerAddress: "0xSELLER..." },
+  seller: sellerConfigFromEnv(),
   buyer: buyerConfigFromEnv(),
 });
 
