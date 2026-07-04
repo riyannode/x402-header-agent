@@ -429,8 +429,6 @@ class CircleDcwNative:
     def sign_typed_data(self, typed_data: Dict[str, Any]) -> str:
         payload = {
             "walletId": self.wallet_id,
-            "walletAddress": self.wallet_address,
-            "blockchain": self.blockchain,
             "data": json.dumps(typed_data, separators=(",", ":")),
             "entitySecretCiphertext": self._fresh_entity_secret_ciphertext(),
             "memo": "x402 Gateway authorization",
