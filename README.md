@@ -224,7 +224,7 @@ Use `X402_ALLOW_LOCALHOST=true` only for local validation. Public production end
 
 - TypeScript package name: `x402-header-agent`
 - Python package name: `x402-header-agent`
-- Python import: `from x402_arc_sdk import X402ArcClient`
+- Python import: `from x402_arc_sdk import X402ArcClient, SellerAgent, DualRoleAgent`
 - Distribution status: not published to npm/PyPI yet; install from GitHub.
 
 ## Security
