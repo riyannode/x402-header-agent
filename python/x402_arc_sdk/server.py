@@ -144,26 +144,42 @@ class SellerAgent:
         guarantees settlement. (See Circle docs: "Use settle() directly
         rather than calling verify() followed by settle()")
 
+        API: POST /v1/x402/settle
+        Body: {paymentPayload: {...}, paymentRequirements: {...}}
+
         Returns PaymentInfo on success.
         """
         payload = _decode_b64_json(payment_header)
 
-        x402_version = payload.get("x402Version", 2)
-        inner_payload = payload.get("payload", {})
-        resource = payload.get("resource")
+        # Build the paymentPayload (what the buyer signed)
+        payment_payload = {
+            "x402Version": payload.get("x402Version", 2),
+            "payload": payload.get("payload", {}),
+            "resource": payload.get("resource"),
+            "accepted": payload.get("accepted", {}),
+        }
+
+        # Build the paymentRequirements (what the seller declared)
         accepted = payload.get("accepted", {})
+        payment_requirements = {
+            "scheme": accepted.get("scheme", "exact"),
+            "network": accepted.get("network", self._chain_config["network"]),
+            "asset": accepted.get("extra", {}).get("verifyingContract", ""),
+            "amount": accepted.get("maxAmountRequired", "0"),
+            "payTo": accepted.get("payTo", self.config.seller_address),
+            "maxTimeoutSeconds": accepted.get("maxTimeoutSeconds", 604900),
+            "extra": accepted.get("extra", {}),
+        }
 
         settle_body = {
-            "x402Version": x402_version,
-            "payload": inner_payload,
-            "resource": resource,
-            "accepted": accepted,
+            "paymentPayload": payment_payload,
+            "paymentRequirements": payment_requirements,
         }
 
         facilitator_url = self.config.facilitator_url.rstrip("/")
         async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.post(
-                f"{facilitator_url}/settle",
+                f"{facilitator_url}/x402/settle",
                 json=settle_body,
                 headers={"content-type": "application/json"},
             )
@@ -178,6 +194,7 @@ class SellerAgent:
         settle_data = response.json() if "application/json" in response.headers.get("content-type", "") else {}
 
         # Extract payment info from settle response
+        inner_payload = payload.get("payload", {})
         payer = inner_payload.get("authorization", {}).get("from", "")
         network = accepted.get("network", self._chain_config["network"])
         transaction = settle_data.get("transaction", "") or settle_data.get("txHash", "")
