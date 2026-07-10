@@ -184,7 +184,6 @@ class TestDualRoleAgent:
             transaction="0xtx",
         )
         agent._seller.settle = AsyncMock(return_value=fake_payment)
-        agent._seller.verify = AsyncMock(return_value={})
 
         # Mock the buyer's pay_resource
         agent._buyer.pay_resource = MagicMock(return_value={"status": "success", "data": "downstream result"})
@@ -225,7 +224,6 @@ class TestDualRoleAgent:
             network="eip155:5042002",
         )
         agent._seller.settle = AsyncMock(return_value=fake_payment)
-        agent._seller.verify = AsyncMock(return_value={})
 
         async def handler(spend, payment):
             raise RuntimeError("handler failed")

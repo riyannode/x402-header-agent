@@ -152,9 +152,9 @@ class DualRoleAgent:
         price: str,
         handler: HandlerFunc,
     ) -> dict[str, Any]:
-        """Process a request: verify payment, call handler with spend(), return result.
+        """Process a request: settle payment, call handler with spend(), return result.
 
-        1. Seller: verify + settle payment (or return 402)
+        1. Seller: settle payment via Gateway (or return 402)
         2. Handler: receives spend() function and PaymentInfo
         3. Spend: handler calls spend(url) → buyer pays downstream
 

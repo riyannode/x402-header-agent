@@ -136,50 +136,16 @@ class SellerAgent:
             },
         }
 
-    async def verify(self, payment_header: str, price: str) -> dict[str, Any]:
-        """Verify a payment signature via Gateway API.
-
-        Returns the Gateway verify response on success, raises X402PaymentError on failure.
-        """
-        amount_base = str(_usdc_to_base_units(_normalize_usdc(price.lstrip("$"))))
-        payload = _decode_b64_json(payment_header)
-
-        x402_version = payload.get("x402Version", 2)
-        inner_payload = payload.get("payload", {})
-        resource = payload.get("resource")
-        accepted = payload.get("accepted", {})
-
-        # Build the verify request
-        verify_body = {
-            "x402Version": x402_version,
-            "payload": inner_payload,
-            "resource": resource,
-            "accepted": accepted,
-        }
-
-        facilitator_url = self.config.facilitator_url.rstrip("/")
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                f"{facilitator_url}/verify",
-                json=verify_body,
-                headers={"content-type": "application/json"},
-            )
-
-        if response.status_code >= 400:
-            data = response.json() if "application/json" in response.headers.get("content-type", "") else {}
-            raise X402PaymentError(
-                f"Gateway verify failed: {response.status_code} "
-                f"{data.get('message') or data.get('error') or response.text[:160]}"
-            )
-
-        return response.json() if "application/json" in response.headers.get("content-type", "") else {}
-
     async def settle(self, payment_header: str, price: str) -> PaymentInfo:
-        """Settle a verified payment via Gateway API.
+        """Settle a payment via Gateway API.
+
+        Uses settle() directly — no separate verify() step needed.
+        Gateway's settle() endpoint is optimized for low latency and
+        guarantees settlement. (See Circle docs: "Use settle() directly
+        rather than calling verify() followed by settle()")
 
         Returns PaymentInfo on success.
         """
-        amount_base = str(_usdc_to_base_units(_normalize_usdc(price.lstrip("$"))))
         payload = _decode_b64_json(payment_header)
 
         x402_version = payload.get("x402Version", 2)
@@ -232,7 +198,8 @@ class SellerAgent:
     ) -> dict[str, Any] | PaymentInfo:
         """Process a request that may require payment.
 
-        Convenience method that combines 402, verify, and settle.
+        Convenience method that combines 402 and settle.
+        No separate verify step — settle() directly handles both.
 
         Returns either:
           - A dict {"status": 402, "body": {...}} if payment needed/failed
@@ -249,13 +216,11 @@ class SellerAgent:
             )}
 
         try:
-            # Verify
-            await self.verify(payment_header, price)
-            # Settle
+            # Settle directly — no separate verify
             payment_info = await self.settle(payment_header, price)
             return payment_info
         except Exception as e:
-            # Return 402 on verification/settlement failure
+            # Return 402 on settlement failure
             return {"status": 402, "body": {"error": str(e)}}
 
 
