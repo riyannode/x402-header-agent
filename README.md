@@ -1,6 +1,6 @@
 # x402-header-agent
 
-Simple SDK for Circle Gateway x402 nanopayments on Arc Testnet. Buyer signing uses Circle Developer-Controlled Wallets (DCW), not raw private keys.
+Simple standalone SDK for Circle Gateway x402 nanopayments on Arc Testnet. Buyer signing uses Circle Developer-Controlled Wallets (DCW), not raw private keys.
 
 This package uses Circle Gateway batched x402 flow: seller returns HTTP `402` with `PAYMENT-REQUIRED`; buyer signs EIP-3009/EIP-712 authorization through Circle DCW; buyer retries with `Payment-Signature`; seller settles through Circle Gateway.
 
