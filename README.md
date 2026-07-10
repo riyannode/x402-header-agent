@@ -8,7 +8,10 @@ This package uses Circle Gateway batched x402 flow: seller returns HTTP `402` wi
 
 - TypeScript buyer: `BuyerBatchAgent` using Circle official `@circle-fin/x402-batching` + Circle DCW signer.
 - TypeScript seller: `SellerBatchAgent` and Express middleware wrapper.
+- TypeScript dual-role: `DualRoleAgent` (composition wrapper).
 - Native Python buyer: `X402ArcClient`, native only, no raw buyer key.
+- Native Python seller: `SellerAgent`, framework-agnostic middleware.
+- Native Python dual-role: `DualRoleAgent` (receive payment + spend to downstream, DCW only).
 - LangChain, CrewAI-style, OpenAI/custom tool adapters.
 - Single payment and batch payment.
 - Policy caps: daily budget, max single payment, max batch payment, host allowlist, HTTPS requirement.
@@ -38,7 +41,7 @@ pip install "git+https://github.com/riyannode/x402-header-agent.git#subdirectory
 Python import:
 
 ```python
-from x402_arc_sdk import X402ArcClient
+from x402_arc_sdk import X402ArcClient, SellerAgent, DualRoleAgent
 ```
 
 ## Local verification
