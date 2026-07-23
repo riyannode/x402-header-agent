@@ -42,11 +42,10 @@ def _fake_payment_header() -> str:
         "accepted": {
             "scheme": "exact",
             "network": "eip155:5042002",
-            "maxAmountRequired": "1000",
-            "resource": "",
-            "description": "Test",
-            "mimeType": "",
+            "asset": "0x3600000000000000000000000000000000000000",
+            "amount": "1000",
             "payTo": SELLER_ADDRESS,
+            "maxTimeoutSeconds": 604900,
             "extra": {
                 "name": "GatewayWalletBatched",
                 "version": "1",
@@ -60,7 +59,7 @@ def _fake_payment_header() -> str:
 
 class TestSellerAgent:
     def test_config_validation(self):
-        with pytest.raises(ValueError, match="seller_address is required"):
+        with pytest.raises(ValueError, match="must be a 0x-prefixed 20-byte EVM address"):
             SellerConfig(seller_address="")
 
     def test_build_402_response(self):
@@ -68,16 +67,19 @@ class TestSellerAgent:
         resp = seller._build_402_response("0.001", "/api/test")
         assert resp["x402Version"] == 2
         assert "accepts" in resp
-        assert resp["resource"] == "/api/test"
+        assert resp["resource"]["url"] == "/api/test"
         assert resp["accepts"][0]["payTo"] == SELLER_ADDRESS
         assert resp["accepts"][0]["scheme"] == "exact"
 
-    def test_build_acceptance(self):
+    def test_build_requirements(self):
         seller = SellerAgent(SellerConfig(seller_address=SELLER_ADDRESS))
-        acc = seller._build_acceptance("0.01")
+        acc = seller._build_requirements(
+            amount_atomic="10000",
+            chain_config={"network": "eip155:5042002", "usdc": "0x3600000000000000000000000000000000000000", "gateway_wallet": "0x0077777d7EBA4688BDeF3E311b846F25870A19B9"},
+        )
         assert acc["payTo"] == SELLER_ADDRESS
         assert acc["network"] == "eip155:5042002"
-        assert acc["maxAmountRequired"] == "10000"
+        assert acc["amount"] == "10000"
 
     def test_from_env(self):
         os.environ["SELLER_ADDRESS"] = SELLER_ADDRESS
@@ -101,7 +103,7 @@ class TestPaymentInfo:
         assert "Payment-Response" in headers
         decoded = json.loads(base64.b64decode(headers["Payment-Response"]))
         assert decoded["payer"] == BUYER_ADDRESS
-        assert decoded["amount"] == "0.001"
+        assert decoded["transaction"] == "0xabc"
 
 
 # --- DualRoleAgent tests ---

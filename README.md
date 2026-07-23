@@ -144,6 +144,8 @@ receipt = client.pay_resource("https://seller.example.com/premium", max_usdc="0.
 
 ## Seller
 
+TypeScript:
+
 ```ts
 import express from "express";
 import { SellerBatchAgent, mountPaidJsonRoute, sellerConfigFromEnv } from "x402-header-agent";
@@ -157,6 +159,54 @@ mountPaidJsonRoute(app, "get", "/premium-data", seller, { priceUsdc: "0.001" }, 
 }));
 
 app.listen(3000);
+```
+
+Python (framework-agnostic):
+
+```python
+from x402_arc_sdk import PaymentInfo, SellerAgent
+
+seller = SellerAgent.from_env()
+
+result = await seller.process_request(
+    payment_header=request.headers.get("Payment-Signature"),
+    path=str(request.url),
+    price="$0.001",
+)
+
+if isinstance(result, dict):
+    return Response(
+        status=result["status"],
+        headers=result.get("headers", {}),
+        body=result["body"],
+    )
+
+payment: PaymentInfo = result
+
+return Response(
+    status=200,
+    headers=payment.response_headers,
+    body={
+        "paidBy": payment.payer,
+        "transaction": payment.transaction,
+        "content": "paid payload",
+    },
+)
+```
+
+FastAPI live seller:
+
+```bash
+cd python
+pip install -e ".[all]"
+
+export SELLER_ADDRESS="0x..."
+export X402_CHAIN="arcTestnet"
+export X402_FACILITATOR_URL="https://gateway-api-testnet.circle.com"
+
+uvicorn examples.seller_fastapi:app \
+  --host 127.0.0.1 \
+  --port 3001
 ```
 
 ## Dual-role agent
