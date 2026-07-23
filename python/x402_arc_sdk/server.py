@@ -1,211 +1,570 @@
-"""Seller middleware for Circle Gateway x402 payments.
+"""Native Python seller middleware for Circle Gateway x402 v2 nanopayments.
 
-Framework-agnostic: exposes process_request() that takes generic inputs and
-returns generic outputs. No framework imports.
+The public API remains intentionally small:
 
-Usage:
-    seller = SellerAgent(seller_address="0x...", chain="arcTestnet")
+    seller = SellerAgent.from_env()
+    result = await seller.process_request(payment_header, resource_url, "$0.001")
 
-    # In any async framework:
-    result = await seller.process_request(
-        payment_header=request.headers.get("PAYMENT-SIGNATURE"),
-        path="/api/analyze",
-        price="$0.01",
-    )
-
-    if isinstance(result, dict):
-        # 402: return body + PAYMENT-REQUIRED header
-        ...
-    else:
-        # PaymentInfo: return data + PAYMENT-RESPONSE header
-        ...
+The seller, not the buyer, owns the payment requirements passed to Circle Gateway.
 """
+
 from __future__ import annotations
 
+import asyncio
 import base64
+import hashlib
 import json
 import os
-import secrets
-import time
-import uuid
-from dataclasses import dataclass, field
-from typing import Any, Optional
+import re
+from dataclasses import dataclass, field, replace
+from typing import Any
 
 import httpx
 
 from .client import (
     ARC_TESTNET,
+    MAX_PAYMENT_HEADER_BYTES,
     X402PaymentError,
     _b64_json,
-    _decode_b64_json,
-    _normalize_evm_signature,
     _normalize_usdc,
     _usdc_to_base_units,
 )
-
 
 PAYMENT_SIGNATURE_HEADER = "Payment-Signature"
 PAYMENT_REQUIRED_HEADER = "Payment-Required"
 PAYMENT_RESPONSE_HEADER = "Payment-Response"
 
+X402_VERSION = 2
+CIRCLE_BATCHING_SCHEME = "exact"
+CIRCLE_BATCHING_NAME = "GatewayWalletBatched"
+CIRCLE_BATCHING_VERSION = "1"
+SERVER_MIN_TIMEOUT_SECONDS = 7 * 24 * 60 * 60 + 100
+BUYER_MAX_TIMEOUT_SECONDS = 30 * 24 * 60 * 60
+
+_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
+
+
+def _validate_address(value: Any, field_name: str) -> str:
+    if not isinstance(value, str) or not _ADDRESS_RE.fullmatch(value):
+        raise ValueError(f"{field_name} must be a 0x-prefixed 20-byte EVM address")
+    return value
+
+
+def _decode_payment_signature(value: str) -> dict[str, Any]:
+    if not isinstance(value, str) or not value.strip():
+        raise X402PaymentError("Payment-Signature header is required")
+    encoded = value.strip()
+    if len(encoded.encode("utf-8")) > MAX_PAYMENT_HEADER_BYTES:
+        raise X402PaymentError(
+            f"Payment-Signature exceeds {MAX_PAYMENT_HEADER_BYTES} bytes"
+        )
+    padded = encoded + ("=" * (-len(encoded) % 4))
+    try:
+        raw = base64.b64decode(padded, altchars=b"-_", validate=True)
+        decoded = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise X402PaymentError("Invalid Payment-Signature header") from exc
+    if not isinstance(decoded, dict):
+        raise X402PaymentError("Payment-Signature payload must be a JSON object")
+    return decoded
+
+
+def _canonical_json(value: Any) -> bytes:
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+
+
+def _payment_fingerprint(decoded: dict[str, Any]) -> str:
+    payload = decoded.get("payload")
+    authorization = (
+        payload.get("authorization")
+        if isinstance(payload, dict)
+        else None
+    )
+    signature = (
+        payload.get("signature")
+        if isinstance(payload, dict)
+        else None
+    )
+
+    return hashlib.sha256(
+        _canonical_json(
+            {
+                "authorization": authorization,
+                "signature": signature,
+                "accepted": decoded.get("accepted"),
+                "resource": decoded.get("resource"),
+            }
+        )
+    ).hexdigest()
+
+
+def _resource_url_from_payload(decoded: dict[str, Any]) -> str:
+    resource = decoded.get("resource")
+
+    if isinstance(resource, str):
+        if not resource:
+            raise X402PaymentError("Payment payload resource is empty")
+        return resource
+
+    if isinstance(resource, dict):
+        url = resource.get("url")
+        if not isinstance(url, str) or not url:
+            raise X402PaymentError("Payment payload resource.url is missing")
+        return url
+
+    raise X402PaymentError("Payment payload resource is missing")
+
+
+def _validate_resource_binding(
+    decoded: dict[str, Any],
+    expected_resource_url: str,
+) -> None:
+    paid_resource_url = _resource_url_from_payload(decoded)
+
+    if paid_resource_url != expected_resource_url:
+        raise X402PaymentError(
+            "Payment resource does not match the requested resource"
+        )
+
+
+def _normalize_settle_url(value: str) -> str:
+    """Normalize Circle Gateway base URLs to the current x402 settle endpoint."""
+    raw = value.strip().rstrip("/")
+    if not raw:
+        raw = "https://gateway-api-testnet.circle.com"
+
+    if raw.endswith("/gateway/v1/x402/settle"):
+        return raw
+    if raw.endswith("/gateway/v1"):
+        return f"{raw}/x402/settle"
+
+    # Backward-compatible handling for the repository's former `.../v1` default.
+    if raw.endswith("/v1/x402/settle"):
+        raw = raw[: -len("/v1/x402/settle")]
+    elif raw.endswith("/v1"):
+        raw = raw[: -len("/v1")]
+    elif raw.endswith("/x402/settle"):
+        raw = raw[: -len("/x402/settle")]
+
+    return f"{raw}/gateway/v1/x402/settle"
+
+
+def _resolve_chain_config(network_or_chain: str) -> dict[str, Any]:
+    if network_or_chain in {"arcTestnet", ARC_TESTNET["network"]}:
+        return ARC_TESTNET
+    raise ValueError(f"Unsupported seller network: {network_or_chain}")
+
+
+@dataclass(frozen=True)
+class SettleResult:
+    success: bool
+    transaction: str = ""
+    payer: str = ""
+    network: str = ""
+    error_reason: str = ""
+
+
+class BatchFacilitatorClient:
+    """Typed HTTP client for Circle Gateway x402 settlement."""
+
+    def __init__(
+        self,
+        url: str,
+        *,
+        http_client: httpx.AsyncClient | None = None,
+    ) -> None:
+        self.settle_url = _normalize_settle_url(url)
+        self._http = http_client
+        self._owned_http: httpx.AsyncClient | None = None
+
+    def _client(self) -> httpx.AsyncClient:
+        if self._http is not None:
+            return self._http
+        if self._owned_http is None:
+            self._owned_http = httpx.AsyncClient(
+                timeout=httpx.Timeout(connect=5.0, read=30.0, write=10.0, pool=5.0),
+                follow_redirects=False,
+                limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+            )
+        return self._owned_http
+
+    async def settle(
+        self,
+        payment_payload: dict[str, Any],
+        payment_requirements: dict[str, Any],
+    ) -> SettleResult:
+        try:
+            response = await self._client().post(
+                self.settle_url,
+                json={
+                    "paymentPayload": payment_payload,
+                    "paymentRequirements": payment_requirements,
+                },
+                headers={"content-type": "application/json"},
+            )
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            # The request may have reached Gateway. Do not claim it is safe to repay.
+            raise X402PaymentError(
+                f"Gateway settlement outcome is ambiguous: {type(exc).__name__}; "
+                "do not automatically create another payment"
+            ) from exc
+
+        try:
+            data = response.json()
+        except (ValueError, json.JSONDecodeError) as exc:
+            raise X402PaymentError(
+                f"Gateway settle returned non-JSON response ({response.status_code})"
+            ) from exc
+
+        if response.status_code < 200 or response.status_code >= 300:
+            reason = (
+                data.get("errorReason")
+                or data.get("message")
+                or data.get("error")
+                or "gateway request failed"
+            )
+            raise X402PaymentError(
+                f"Gateway settle failed ({response.status_code}): {str(reason)[:200]}"
+            )
+
+        if not isinstance(data, dict) or not isinstance(data.get("success"), bool):
+            raise X402PaymentError("Gateway settle returned an invalid response")
+
+        if data["success"] is not True:
+            return SettleResult(
+                success=False,
+                payer=str(data.get("payer") or ""),
+                network=str(data.get("network") or ""),
+                error_reason=str(data.get("errorReason") or "settlement rejected"),
+            )
+
+        transaction = data.get("transaction")
+        if not isinstance(transaction, str) or not transaction:
+            raise X402PaymentError("Gateway success response is missing transaction")
+
+        return SettleResult(
+            success=True,
+            transaction=transaction,
+            payer=str(data.get("payer") or ""),
+            network=str(data.get("network") or payment_requirements["network"]),
+        )
+
+    async def aclose(self) -> None:
+        if self._owned_http is not None:
+            await self._owned_http.aclose()
+            self._owned_http = None
+
 
 @dataclass
 class SellerConfig:
-    """Configuration for x402 seller."""
-
     seller_address: str
     chain: str = "arcTestnet"
-    facilitator_url: str = ""
+    facilitator_url: str = "https://gateway-api-testnet.circle.com"
     description: str = "Paid resource"
     networks: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
-        if not self.seller_address:
-            raise ValueError("seller_address is required")
+        _validate_address(self.seller_address, "seller_address")
         if not self.facilitator_url:
-            chain_config = _get_chain_config(self.chain)
-            self.facilitator_url = _get_gateway_api_url(chain_config)
+            self.facilitator_url = "https://gateway-api-testnet.circle.com"
+        configured = self.networks or [self.chain]
+        for network in configured:
+            _resolve_chain_config(network)
 
 
-@dataclass
+@dataclass(frozen=True)
 class PaymentInfo:
-    """Payment information attached to request after verification."""
-
     verified: bool
     payer: str
-    amount: str
+    amount: str  # human USDC, retained for compatibility
     network: str
     transaction: str = ""
+    amount_atomic: str = ""
+    replayed: bool = False
 
     @property
     def response_headers(self) -> dict[str, str]:
-        """Headers to include in the response after successful payment."""
-        return {PAYMENT_RESPONSE_HEADER: _b64_json({
-            "payer": self.payer,
-            "amount": self.amount,
-            "network": self.network,
-            **({"transaction": self.transaction} if self.transaction else {}),
-        })}
+        return {
+            PAYMENT_RESPONSE_HEADER: _b64_json(
+                {
+                    "success": True,
+                    "transaction": self.transaction,
+                    "network": self.network,
+                    "payer": self.payer,
+                }
+            )
+        }
 
 
 class SellerAgent:
-    """Framework-agnostic seller for x402 payments.
+    """Framework-agnostic native Python x402 seller."""
 
-    Handles 402 responses, payment verification, and settlement via Circle Gateway.
-    """
-
-    def __init__(self, config: SellerConfig) -> None:
+    def __init__(
+        self,
+        config: SellerConfig,
+        *,
+        facilitator: BatchFacilitatorClient | None = None,
+    ) -> None:
         self.config = config
-        self._chain_config = _get_chain_config(config.chain)
+        self._network_configs = [
+            _resolve_chain_config(value)
+            for value in (config.networks or [config.chain])
+        ]
+        self._facilitator = facilitator or BatchFacilitatorClient(
+            config.facilitator_url
+        )
+        self._receipt_guard = asyncio.Lock()
+        self._payment_locks: dict[str, asyncio.Lock] = {}
+        self._successful_receipts: dict[str, PaymentInfo] = {}
 
     @classmethod
-    def from_env(cls) -> SellerAgent:
-        return cls(SellerConfig(
-            seller_address=os.environ.get("SELLER_ADDRESS", ""),
-            chain=os.environ.get("X402_CHAIN", "arcTestnet"),
-            facilitator_url=os.environ.get("X402_FACILITATOR_URL", ""),
-            description=os.environ.get("X402_SELLER_DESCRIPTION", "Paid resource"),
-            networks=[n.strip() for n in os.environ.get("X402_SELLER_NETWORKS", "").split(",") if n.strip()],
-        ))
+    def from_env(cls) -> "SellerAgent":
+        return cls(
+            SellerConfig(
+                seller_address=os.environ.get("SELLER_ADDRESS", ""),
+                chain=os.environ.get("X402_CHAIN", "arcTestnet"),
+                facilitator_url=os.environ.get(
+                    "X402_FACILITATOR_URL",
+                    "https://gateway-api-testnet.circle.com",
+                ),
+                description=os.environ.get(
+                    "X402_SELLER_DESCRIPTION", "Paid resource"
+                ),
+                networks=[
+                    value.strip()
+                    for value in os.environ.get(
+                        "X402_SELLER_NETWORKS", ""
+                    ).split(",")
+                    if value.strip()
+                ],
+            )
+        )
 
-    def _build_402_response(self, amount: str, path: str) -> dict[str, Any]:
-        """Build a 402 Payment Required response body."""
-        accepted = self._build_acceptance(amount)
+    def _build_requirements(
+        self,
+        *,
+        amount_atomic: str,
+        chain_config: dict[str, Any],
+    ) -> dict[str, Any]:
         return {
-            "x402Version": 2,
-            "accepts": [accepted],
-            "resource": path,
-        }
-
-    def _build_acceptance(self, amount: str) -> dict[str, Any]:
-        """Build a single acceptance entry for the 402 response."""
-        networks = self.config.networks or [self._chain_config["network"]]
-        chain_config = _resolve_chain_config(networks[0])
-        return {
-            "scheme": "exact",
-            "network": networks[0],
-            "maxAmountRequired": str(_usdc_to_base_units(amount)),
-            "resource": "",
-            "description": self.config.description,
-            "mimeType": "",
+            "scheme": CIRCLE_BATCHING_SCHEME,
+            "network": chain_config["network"],
+            "asset": chain_config["usdc"],
+            "amount": amount_atomic,
             "payTo": self.config.seller_address,
+            "maxTimeoutSeconds": SERVER_MIN_TIMEOUT_SECONDS,
             "extra": {
-                "name": "GatewayWalletBatched",
-                "version": "1",
+                "name": CIRCLE_BATCHING_NAME,
+                "version": CIRCLE_BATCHING_VERSION,
                 "verifyingContract": chain_config["gateway_wallet"],
             },
         }
 
-    async def settle(self, payment_header: str, price: str) -> PaymentInfo:
-        """Settle a payment via Gateway API.
-
-        Uses settle() directly — no separate verify() step needed.
-        Gateway's settle() endpoint is optimized for low latency and
-        guarantees settlement. (See Circle docs: "Use settle() directly
-        rather than calling verify() followed by settle()")
-
-        API: POST /v1/x402/settle
-        Body: {paymentPayload: {...}, paymentRequirements: {...}}
-
-        Returns PaymentInfo on success.
-        """
-        payload = _decode_b64_json(payment_header)
-
-        # Build the paymentPayload (what the buyer signed)
-        payment_payload = {
-            "x402Version": payload.get("x402Version", 2),
-            "payload": payload.get("payload", {}),
-            "resource": payload.get("resource"),
-            "accepted": payload.get("accepted", {}),
+    def _build_402_response(
+        self,
+        amount_atomic: str,
+        resource_url: str,
+    ) -> dict[str, Any]:
+        return {
+            "x402Version": X402_VERSION,
+            "resource": {
+                "url": resource_url,
+                "description": self.config.description,
+                "mimeType": "application/json",
+            },
+            "accepts": [
+                self._build_requirements(
+                    amount_atomic=amount_atomic,
+                    chain_config=chain_config,
+                )
+                for chain_config in self._network_configs
+            ],
         }
 
-        # Build the paymentRequirements (what the seller declared)
-        accepted = payload.get("accepted", {})
-        payment_requirements = {
-            "scheme": accepted.get("scheme", "exact"),
-            "network": accepted.get("network", self._chain_config["network"]),
-            "asset": accepted.get("extra", {}).get("verifyingContract", ""),
-            "amount": accepted.get("maxAmountRequired", "0"),
-            "payTo": accepted.get("payTo", self.config.seller_address),
-            "maxTimeoutSeconds": accepted.get("maxTimeoutSeconds", 604900),
-            "extra": accepted.get("extra", {}),
+    def require(self, price: str, resource_url: str) -> dict[str, Any]:
+        amount_human = _normalize_usdc(price.lstrip("$"))
+        if amount_human == "0":
+            raise ValueError("seller price must be greater than zero")
+        amount_atomic = str(_usdc_to_base_units(amount_human))
+        body = self._build_402_response(amount_atomic, resource_url)
+        return {
+            "status": 402,
+            "headers": {PAYMENT_REQUIRED_HEADER: _b64_json(body)},
+            "body": body,
         }
 
-        settle_body = {
-            "paymentPayload": payment_payload,
-            "paymentRequirements": payment_requirements,
-        }
+    def _expected_for_selected_network(
+        self,
+        accepted: dict[str, Any],
+        amount_atomic: str,
+    ) -> dict[str, Any]:
+        network = accepted.get("network")
+        for chain_config in self._network_configs:
+            if chain_config["network"] == network:
+                return self._build_requirements(
+                    amount_atomic=amount_atomic,
+                    chain_config=chain_config,
+                )
+        raise X402PaymentError(f"Selected network is not accepted: {network!r}")
 
-        facilitator_url = self.config.facilitator_url.rstrip("/")
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.post(
-                f"{facilitator_url}/x402/settle",
-                json=settle_body,
-                headers={"content-type": "application/json"},
-            )
+    def _validate_selected_requirement(
+        self,
+        accepted: dict[str, Any],
+        expected: dict[str, Any],
+    ) -> None:
+        for field_name in ("scheme", "network", "asset", "amount", "payTo"):
+            actual = accepted.get(field_name)
+            target = expected[field_name]
+            if (
+                field_name in {"asset", "payTo"}
+                and isinstance(actual, str)
+                and isinstance(target, str)
+            ):
+                matches = actual.lower() == target.lower()
+            else:
+                matches = actual == target
+            if not matches:
+                raise X402PaymentError(
+                    f"Selected payment requirement mismatch: {field_name}"
+                )
 
-        if response.status_code >= 400:
-            data = response.json() if "application/json" in response.headers.get("content-type", "") else {}
+        timeout = accepted.get("maxTimeoutSeconds")
+        if isinstance(timeout, bool) or not isinstance(timeout, int):
+            raise X402PaymentError("Invalid maxTimeoutSeconds")
+        if timeout != expected["maxTimeoutSeconds"]:
             raise X402PaymentError(
-                f"Gateway settle failed: {response.status_code} "
-                f"{data.get('message') or data.get('error') or response.text[:160]}"
+                "Selected payment requirement mismatch: maxTimeoutSeconds"
             )
 
-        settle_data = response.json() if "application/json" in response.headers.get("content-type", "") else {}
+        extra = accepted.get("extra")
+        if not isinstance(extra, dict):
+            raise X402PaymentError("Selected payment requirement is missing extra")
+        for field_name in ("name", "version", "verifyingContract"):
+            actual = extra.get(field_name)
+            target = expected["extra"][field_name]
+            if (
+                field_name == "verifyingContract"
+                and isinstance(actual, str)
+                and isinstance(target, str)
+            ):
+                matches = actual.lower() == target.lower()
+            else:
+                matches = actual == target
+            if not matches:
+                raise X402PaymentError(
+                    f"Selected payment requirement mismatch: extra.{field_name}"
+                )
 
-        # Extract payment info from settle response
-        inner_payload = payload.get("payload", {})
-        payer = inner_payload.get("authorization", {}).get("from", "")
-        network = accepted.get("network", self._chain_config["network"])
-        transaction = settle_data.get("transaction", "") or settle_data.get("txHash", "")
+    def _validate_payment_payload(
+        self,
+        decoded: dict[str, Any],
+        expected: dict[str, Any],
+    ) -> tuple[str, dict[str, Any]]:
+        if decoded.get("x402Version") != X402_VERSION:
+            raise X402PaymentError("Unsupported x402Version")
 
-        return PaymentInfo(
-            verified=True,
-            payer=payer,
-            amount=price.lstrip("$"),
-            network=network,
-            transaction=transaction,
+        payload = decoded.get("payload")
+        if not isinstance(payload, dict):
+            raise X402PaymentError("Payment payload is missing payload")
+
+        authorization = payload.get("authorization")
+        if not isinstance(authorization, dict):
+            raise X402PaymentError("Payment payload is missing authorization")
+
+        signature = payload.get("signature")
+        if not isinstance(signature, str) or not signature:
+            raise X402PaymentError("Payment payload is missing signature")
+
+        payer = _validate_address(authorization.get("from"), "payer")
+        destination = _validate_address(authorization.get("to"), "authorization.to")
+
+        if destination.lower() != expected["payTo"].lower():
+            raise X402PaymentError("Authorization destination does not match seller")
+        if str(authorization.get("value")) != expected["amount"]:
+            raise X402PaymentError("Authorization amount does not match route price")
+
+        nonce = authorization.get("nonce")
+        if (
+            not isinstance(nonce, str)
+            or not nonce.startswith("0x")
+            or len(nonce) != 66
+        ):
+            raise X402PaymentError("Authorization nonce must be bytes32")
+
+        for field_name in ("validAfter", "validBefore"):
+            value = authorization.get(field_name)
+            try:
+                parsed = int(str(value))
+            except (TypeError, ValueError) as exc:
+                raise X402PaymentError(
+                    f"Authorization {field_name} must be an integer"
+                ) from exc
+            if parsed < 0:
+                raise X402PaymentError(
+                    f"Authorization {field_name} must not be negative"
+                )
+
+        return payer, authorization
+
+    async def _lock_for_payment(self, fingerprint: str) -> asyncio.Lock:
+        async with self._receipt_guard:
+            return self._payment_locks.setdefault(fingerprint, asyncio.Lock())
+
+    async def settle(
+        self,
+        payment_header: str,
+        price: str,
+        resource_url: str,
+    ) -> PaymentInfo:
+        amount_human = _normalize_usdc(price.lstrip("$"))
+        if amount_human == "0":
+            raise X402PaymentError("seller price must be greater than zero")
+        amount_atomic = str(_usdc_to_base_units(amount_human))
+
+        decoded = _decode_payment_signature(payment_header)
+
+        _validate_resource_binding(
+            decoded,
+            expected_resource_url=resource_url,
         )
+
+        accepted = decoded.get("accepted")
+        if not isinstance(accepted, dict):
+            raise X402PaymentError("Payment payload is missing accepted requirement")
+
+        expected = self._expected_for_selected_network(accepted, amount_atomic)
+        self._validate_selected_requirement(accepted, expected)
+        payer, _authorization = self._validate_payment_payload(decoded, expected)
+
+        fingerprint = _payment_fingerprint(decoded)
+        payment_lock = await self._lock_for_payment(fingerprint)
+
+        async with payment_lock:
+            cached = self._successful_receipts.get(fingerprint)
+            if cached is not None:
+                return replace(cached, replayed=True)
+
+            settlement = await self._facilitator.settle(decoded, expected)
+            if settlement.success is not True:
+                raise X402PaymentError(
+                    f"Gateway rejected settlement: {settlement.error_reason}"
+                )
+
+            payment = PaymentInfo(
+                verified=True,
+                payer=settlement.payer or payer,
+                amount=amount_human,
+                amount_atomic=amount_atomic,
+                network=settlement.network or expected["network"],
+                transaction=settlement.transaction,
+            )
+            self._successful_receipts[fingerprint] = payment
+            return payment
 
     async def process_request(
         self,
@@ -213,73 +572,28 @@ class SellerAgent:
         path: str,
         price: str,
     ) -> dict[str, Any] | PaymentInfo:
-        """Process a request that may require payment.
-
-        Convenience method that combines 402 and settle.
-        No separate verify step — settle() directly handles both.
-
-        Returns either:
-          - A dict {"status": 402, "body": {...}} if payment needed/failed
-          - A PaymentInfo on success
-
-        Args:
-            payment_header: Value of Payment-Signature header, or None
-            path: Request path (e.g., "/api/analyze")
-            price: Price in USD (e.g., "$0.01")
-        """
+        challenge = self.require(price, path)
         if not payment_header:
-            return {"status": 402, "body": self._build_402_response(
-                _normalize_usdc(price.lstrip("$")), path
-            )}
+            return challenge
 
         try:
-            # Settle directly — no separate verify
-            payment_info = await self.settle(payment_header, price)
-            return payment_info
-        except Exception as e:
-            # Return 402 on settlement failure
-            return {"status": 402, "body": {"error": str(e)}}
+            return await self.settle(
+                payment_header,
+                price,
+                path,
+            )
+        except Exception as exc:
+            return {
+                **challenge,
+                "body": {
+                    "error": str(exc),
+                    "retrySafe": False,
+                },
+            }
+
+    async def aclose(self) -> None:
+        await self._facilitator.aclose()
 
 
 def create_seller_agent(config: SellerConfig) -> SellerAgent:
-    """Create a SellerAgent from config."""
     return SellerAgent(config)
-
-
-# --- Chain config helpers (mirrors client.py but for seller) ---
-
-_GATEWAY_WALLETS = {
-    "arcTestnet": "0x0077777d7EBA4688BDeF3E311b846F25870A19B9",
-    "baseSepolia": "0x...",
-}
-
-_NETWORK_CHAIN_MAP = {
-    "eip155:5042002": ARC_TESTNET,
-}
-
-
-def _get_chain_config(chain: str) -> dict[str, Any]:
-    if chain == "arcTestnet":
-        return ARC_TESTNET
-    raise ValueError(f"Unsupported chain: {chain}")
-
-
-def _resolve_chain_config(network: str) -> dict[str, Any]:
-    if network in _NETWORK_CHAIN_MAP:
-        return _NETWORK_CHAIN_MAP[network]
-    # Fallback: parse chainId from CAIP-2
-    if network.startswith("eip155:"):
-        chain_id = int(network.split(":")[1])
-        return {
-            "chain": network,
-            "network": network,
-            "chain_id": chain_id,
-            "gateway_wallet": _GATEWAY_WALLETS.get("arcTestnet", ""),
-        }
-    raise ValueError(f"Cannot resolve chain config for network: {network}")
-
-
-def _get_gateway_api_url(chain_config: dict[str, Any]) -> str:
-    if chain_config.get("chain") == "arcTestnet":
-        return "https://gateway-api-testnet.circle.com/v1"
-    return "https://gateway-api.circle.com/v1"
