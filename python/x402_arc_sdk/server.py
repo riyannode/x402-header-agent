@@ -80,17 +80,56 @@ def _canonical_json(value: Any) -> bytes:
 
 def _payment_fingerprint(decoded: dict[str, Any]) -> str:
     payload = decoded.get("payload")
-    authorization = payload.get("authorization") if isinstance(payload, dict) else None
-    signature = payload.get("signature") if isinstance(payload, dict) else None
+    authorization = (
+        payload.get("authorization")
+        if isinstance(payload, dict)
+        else None
+    )
+    signature = (
+        payload.get("signature")
+        if isinstance(payload, dict)
+        else None
+    )
+
     return hashlib.sha256(
         _canonical_json(
             {
                 "authorization": authorization,
                 "signature": signature,
                 "accepted": decoded.get("accepted"),
+                "resource": decoded.get("resource"),
             }
         )
     ).hexdigest()
+
+
+def _resource_url_from_payload(decoded: dict[str, Any]) -> str:
+    resource = decoded.get("resource")
+
+    if isinstance(resource, str):
+        if not resource:
+            raise X402PaymentError("Payment payload resource is empty")
+        return resource
+
+    if isinstance(resource, dict):
+        url = resource.get("url")
+        if not isinstance(url, str) or not url:
+            raise X402PaymentError("Payment payload resource.url is missing")
+        return url
+
+    raise X402PaymentError("Payment payload resource is missing")
+
+
+def _validate_resource_binding(
+    decoded: dict[str, Any],
+    expected_resource_url: str,
+) -> None:
+    paid_resource_url = _resource_url_from_payload(decoded)
+
+    if paid_resource_url != expected_resource_url:
+        raise X402PaymentError(
+            "Payment resource does not match the requested resource"
+        )
 
 
 def _normalize_settle_url(value: str) -> str:
@@ -397,10 +436,10 @@ class SellerAgent:
         timeout = accepted.get("maxTimeoutSeconds")
         if isinstance(timeout, bool) or not isinstance(timeout, int):
             raise X402PaymentError("Invalid maxTimeoutSeconds")
-        if timeout < expected["maxTimeoutSeconds"]:
-            raise X402PaymentError("maxTimeoutSeconds is below the server minimum")
-        if timeout > BUYER_MAX_TIMEOUT_SECONDS:
-            raise X402PaymentError("maxTimeoutSeconds exceeds the defensive maximum")
+        if timeout != expected["maxTimeoutSeconds"]:
+            raise X402PaymentError(
+                "Selected payment requirement mismatch: maxTimeoutSeconds"
+            )
 
         extra = accepted.get("extra")
         if not isinstance(extra, dict):
@@ -476,13 +515,24 @@ class SellerAgent:
         async with self._receipt_guard:
             return self._payment_locks.setdefault(fingerprint, asyncio.Lock())
 
-    async def settle(self, payment_header: str, price: str) -> PaymentInfo:
+    async def settle(
+        self,
+        payment_header: str,
+        price: str,
+        resource_url: str,
+    ) -> PaymentInfo:
         amount_human = _normalize_usdc(price.lstrip("$"))
         if amount_human == "0":
             raise X402PaymentError("seller price must be greater than zero")
         amount_atomic = str(_usdc_to_base_units(amount_human))
 
         decoded = _decode_payment_signature(payment_header)
+
+        _validate_resource_binding(
+            decoded,
+            expected_resource_url=resource_url,
+        )
+
         accepted = decoded.get("accepted")
         if not isinstance(accepted, dict):
             raise X402PaymentError("Payment payload is missing accepted requirement")
@@ -527,7 +577,11 @@ class SellerAgent:
             return challenge
 
         try:
-            return await self.settle(payment_header, price)
+            return await self.settle(
+                payment_header,
+                price,
+                path,
+            )
         except Exception as exc:
             return {
                 **challenge,

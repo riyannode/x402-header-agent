@@ -214,3 +214,124 @@ async def test_same_signature_is_not_settled_twice() -> None:
     assert calls == 1
 
     await http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_payment_cannot_unlock_different_resource() -> None:
+    calls = 0
+
+    async def gateway(
+        _request: httpx.Request,
+    ) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "transaction": "gateway-transfer-id",
+                "network": ARC_TESTNET["network"],
+                "payer": PAYER,
+            },
+        )
+
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(gateway)
+    )
+
+    seller = SellerAgent(
+        SellerConfig(seller_address=SELLER),
+        facilitator=BatchFacilitatorClient(
+            "https://gateway-api-testnet.circle.com",
+            http_client=http,
+        ),
+    )
+
+    resource_a = "https://seller.example/resource-a"
+    resource_b = "https://seller.example/resource-b"
+
+    challenge_a = (
+        await seller.process_request(
+            None,
+            resource_a,
+            "$0.001",
+        )
+    )["body"]
+
+    payment_header = encode_payload(challenge_a)
+
+    first = await seller.process_request(
+        payment_header,
+        resource_a,
+        "$0.001",
+    )
+
+    replay_on_other_route = await seller.process_request(
+        payment_header,
+        resource_b,
+        "$0.001",
+    )
+
+    assert isinstance(first, PaymentInfo)
+
+    assert isinstance(replay_on_other_route, dict)
+    assert replay_on_other_route["status"] == 402
+    assert (
+        "resource does not match"
+        in replay_on_other_route["body"]["error"]
+    )
+
+    assert calls == 1
+
+    await http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_buyer_cannot_change_timeout() -> None:
+    called = False
+
+    async def gateway(
+        _request: httpx.Request,
+    ) -> httpx.Response:
+        nonlocal called
+        called = True
+        return httpx.Response(500)
+
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(gateway)
+    )
+
+    seller = SellerAgent(
+        SellerConfig(seller_address=SELLER),
+        facilitator=BatchFacilitatorClient(
+            "https://gateway-api-testnet.circle.com",
+            http_client=http,
+        ),
+    )
+
+    challenge = (
+        await seller.process_request(
+            None,
+            RESOURCE,
+            "$0.001",
+        )
+    )["body"]
+
+    payment_header = encode_payload(
+        challenge,
+        accepted_override={
+            "maxTimeoutSeconds": 700000,
+        },
+    )
+
+    result = await seller.process_request(
+        payment_header,
+        RESOURCE,
+        "$0.001",
+    )
+
+    assert isinstance(result, dict)
+    assert result["status"] == 402
+    assert called is False
+
+    await http.aclose()
