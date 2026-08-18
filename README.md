@@ -273,6 +273,22 @@ print(client.pay_resource("http://localhost:3000/premium-data", max_usdc="0.001"
 PY
 ```
 
+### Verified live Arc Testnet run
+
+One real paid request has been executed end to end against live Circle Gateway
+on Arc Testnet (no mocks, no stubbed facilitator, real USDC moved):
+
+| Step | Result |
+| --- | --- |
+| Unpaid `GET` | `HTTP 402` + `PAYMENT-REQUIRED` (`amount` `1000` = `0.001` USDC, `payTo` seller, `GatewayWalletBatched` v1) |
+| Paid retry | `Payment-Signature` from Circle DCW `signTypedData` |
+| Seller settlement | `POST https://gateway-api-testnet.circle.com/v1/x402/settle` -> `success: true` |
+| Paid response | `HTTP 200` + `PAYMENT-RESPONSE` (`network` `eip155:5042002`) |
+| Buyer Gateway balance | decreased by exactly `0.001` USDC; seller `pendingBatch` increased by the same amount |
+
+The settlement identifier returned by Gateway is the batch settlement id in
+`PAYMENT-RESPONSE.transaction`; the buyer receipt carries the same value.
+
 Use `X402_ALLOW_LOCALHOST=true` only for local validation. Public production endpoints should use HTTPS and a strict `X402_HOST_ALLOWLIST`.
 
 > **Note:** Use `X402_HOST_ALLOWLIST=*` only for explicit local demo/testing, never production.
