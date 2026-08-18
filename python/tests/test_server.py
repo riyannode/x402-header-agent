@@ -12,6 +12,7 @@ from x402_arc_sdk.server import (
     PaymentInfo,
     SellerAgent,
     SellerConfig,
+    _normalize_settle_url,
 )
 
 SELLER = "0x1111111111111111111111111111111111111111"
@@ -96,7 +97,7 @@ async def test_success_uses_server_owned_requirements() -> None:
     assert result.amount == "0.001"
     assert result.amount_atomic == "1000"
     assert seen["url"] == (
-        "https://gateway-api-testnet.circle.com/gateway/v1/x402/settle"
+        "https://gateway-api-testnet.circle.com/v1/x402/settle"
     )
 
     requirements = seen["body"]["paymentRequirements"]
@@ -335,3 +336,41 @@ async def test_buyer_cannot_change_timeout() -> None:
     assert called is False
 
     await http.aclose()
+
+
+def test_settle_url_matches_circle_gateway_openapi_spec() -> None:
+    """Canonical Circle Gateway settle endpoint is POST {base}/v1/x402/settle.
+
+    The previous `/gateway/v1/x402/settle` path returns HTTP 404 against
+    gateway-api-testnet.circle.com, so every base-URL spelling must normalize
+    to the documented `/v1/x402/settle` route.
+    """
+    expected = "https://gateway-api-testnet.circle.com/v1/x402/settle"
+
+    for base in (
+        "https://gateway-api-testnet.circle.com",
+        "https://gateway-api-testnet.circle.com/",
+        "https://gateway-api-testnet.circle.com/v1",
+        "https://gateway-api-testnet.circle.com/v1/",
+        "https://gateway-api-testnet.circle.com/v1/x402/settle",
+        "https://gateway-api-testnet.circle.com/x402/settle",
+        # Legacy value this repository previously produced.
+        "https://gateway-api-testnet.circle.com/gateway/v1",
+        "https://gateway-api-testnet.circle.com/gateway/v1/x402/settle",
+    ):
+        assert _normalize_settle_url(base) == expected, base
+
+    assert (
+        _normalize_settle_url("  ") == "https://gateway-api-testnet.circle.com/v1/x402/settle"
+    )
+    assert (
+        _normalize_settle_url("https://gateway-api.circle.com")
+        == "https://gateway-api.circle.com/v1/x402/settle"
+    )
+
+
+def test_seller_agent_default_facilitator_targets_v1_settle_path() -> None:
+    seller = SellerAgent(SellerConfig(seller_address=SELLER))
+    assert seller._facilitator.settle_url == (
+        "https://gateway-api-testnet.circle.com/v1/x402/settle"
+    )

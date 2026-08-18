@@ -225,3 +225,43 @@ test("BuyerBatchAgent constructor works with Circle DCW SDK runtime export shape
   });
   assert.equal(buyer.address, "0x0000000000000000000000000000000000000001");
 });
+
+test("Gateway API headers stay Arc-preview correct without the removed SDK helper", () => {
+  // @circle-fin/x402-batching dropped ARC_PRIVATE_MAINNET_HEADER and
+  // arcPrivateMainnetHeaders() in 3.3.0. The buyer must keep sending the exact
+  // same header for Arc mainnet, and nothing at all for every other chain.
+  // Arc mainnet (and several other CHAIN_CONFIGS entries) intentionally ship no
+  // public rpcUrl, so an explicit transport URL is required to construct the
+  // buyer. That is Circle SDK behaviour, not something this test asserts.
+  const makeBuyer = (chain: string) =>
+    new BuyerBatchAgent({
+      chain,
+      rpcUrl: "https://rpc.invalid.example/never-called",
+      dcw: {
+        apiKey: "TEST_API_KEY:1:2",
+        entitySecret: "test",
+        walletId: "00000000-0000-0000-0000-000000000000",
+        walletAddress: "0x0000000000000000000000000000000000000001",
+      },
+    }) as BuyerBatchAgent & {
+      gatewayApiHeaders(): Record<string, string>;
+      gatewayApiBaseUrl(): string;
+    };
+
+  assert.deepEqual(makeBuyer("arcTestnet").gatewayApiHeaders(), {});
+  assert.deepEqual(makeBuyer("baseSepolia").gatewayApiHeaders(), {});
+  assert.deepEqual(makeBuyer("arc").gatewayApiHeaders(), {
+    "X-ARC-PRIVATE-MAINNET-ENABLED": "true",
+  });
+
+  assert.equal(
+    makeBuyer("arcTestnet").gatewayApiBaseUrl(),
+    "https://gateway-api-testnet.circle.com/v1",
+  );
+  assert.equal(
+    makeBuyer("baseSepolia").gatewayApiBaseUrl(),
+    "https://gateway-api-testnet.circle.com/v1",
+  );
+  assert.equal(makeBuyer("arc").gatewayApiBaseUrl(), "https://gateway-api.circle.com/v1");
+  assert.equal(makeBuyer("base").gatewayApiBaseUrl(), "https://gateway-api.circle.com/v1");
+});

@@ -1,8 +1,16 @@
 # x402-header-agent
 
-Simple standalone SDK for Circle Gateway x402 nanopayments on Arc Testnet. Buyer signing uses Circle Developer-Controlled Wallets (DCW), not raw private keys.
+x402 buyer / seller / dual-role agent SDK for Circle Gateway nanopayments on Arc. Buyer signing uses Circle Developer-Controlled Wallets (DCW), not raw private keys.
 
-This package uses Circle Gateway batched x402 flow: seller returns HTTP `402` with `PAYMENT-REQUIRED`; buyer signs EIP-3009/EIP-712 authorization through Circle DCW; buyer retries with `Payment-Signature`; seller settles through Circle Gateway.
+This package uses the Circle Gateway batched x402 flow: seller returns HTTP `402` with `PAYMENT-REQUIRED`; buyer signs an EIP-3009/EIP-712 `TransferWithAuthorization` against the `GatewayWalletBatched` domain through Circle DCW; buyer retries with `Payment-Signature`; seller settles through Circle Gateway and returns `PAYMENT-RESPONSE`.
+
+## Scope
+
+This repo is the **x402 payment SDK**: buyer, seller, dual-role agent, Circle DCW signing, framework adapters (LangChain / CrewAI / OpenAI tools / plain functions), and payment policy enforcement.
+
+**Out of scope:** durable per-user DCW provisioning and Gateway wallet lifecycle/recovery (wallet creation per end user, deposit reconciliation, withdrawal orchestration, balance recovery flows). That belongs to [`arc-dcw-gateway-kit`](https://github.com/riyannode/arc-dcw-gateway-kit), which is a **separate, complementary** project.
+
+`arc-dcw-gateway-kit` is **not** a dependency of this package and is not required to use it. This SDK takes an already-provisioned DCW wallet (id + address) plus a funded Gateway balance and handles the x402 payment protocol on top. The two compose at the config boundary: the kit supplies wallet/balance lifecycle, this SDK spends and settles.
 
 ## Includes
 
@@ -62,8 +70,11 @@ Python local verification:
 cd python
 python3 -m venv .venv
 . .venv/bin/activate
-pip install -e .
+pip install -e ".[dev]"
+PYTHONPATH=. python -m pytest -q
 ```
+
+CI runs the same TypeScript and Python checks on every push and pull request; see `.github/workflows/ci.yml`.
 
 ## Env
 
@@ -276,6 +287,20 @@ Use `X402_ALLOW_LOCALHOST=true` only for local validation. Public production end
 - Python package name: `x402-header-agent`
 - Python import: `from x402_arc_sdk import X402ArcClient, SellerAgent, DualRoleAgent`
 - Distribution status: not published to npm/PyPI yet; install from GitHub.
+
+## Circle Gateway endpoints
+
+The seller settles through Circle Gateway's x402 API. Canonical paths (Circle Gateway OpenAPI, `gateway-api-testnet.circle.com` / `gateway-api.circle.com`):
+
+| Purpose | Endpoint |
+| --- | --- |
+| Settle an x402 payment | `POST {base}/v1/x402/settle` |
+| Supported payment kinds | `GET {base}/v1/x402/supported` |
+| Gateway balances | `POST {base}/v1/balances` |
+
+Per Circle's guidance, sellers call `settle()` directly rather than `verify()` followed by `settle()`. Payment authorizations must carry at least 7 days of validity plus a buffer (`minValiditySeconds` is `604800`; this SDK signs `604900`).
+
+Gateway deposits use `depositFor(address token, address depositor, uint256 value)` on the Gateway Wallet contract. This matches the current `GATEWAY_WALLET_ABI` in `@circle-fin/x402-batching` and is intentionally unchanged.
 
 ## Security
 
