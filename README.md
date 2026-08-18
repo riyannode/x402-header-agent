@@ -275,7 +275,7 @@ PY
 
 ### Verified live Arc Testnet run
 
-One real paid request has been executed end to end against live Circle Gateway
+A real paid request has been executed end to end against live Circle Gateway
 on Arc Testnet (no mocks, no stubbed facilitator, real USDC moved):
 
 | Step | Result |
