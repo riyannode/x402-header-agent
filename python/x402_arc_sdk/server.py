@@ -133,25 +133,31 @@ def _validate_resource_binding(
 
 
 def _normalize_settle_url(value: str) -> str:
-    """Normalize Circle Gateway base URLs to the current x402 settle endpoint."""
+    """Normalize Circle Gateway base URLs to the current x402 settle endpoint.
+
+    The canonical endpoint is ``POST {base}/v1/x402/settle``, matching Circle's
+    Gateway OpenAPI spec and ``BatchFacilitatorClient`` in
+    ``@circle-fin/x402-batching``. The former ``/gateway/v1/x402/settle`` path
+    returns HTTP 404 and is rewritten here for backward compatibility.
+    """
     raw = value.strip().rstrip("/")
     if not raw:
         raw = "https://gateway-api-testnet.circle.com"
 
-    if raw.endswith("/gateway/v1/x402/settle"):
-        return raw
-    if raw.endswith("/gateway/v1"):
-        return f"{raw}/x402/settle"
+    # Strip any already-appended settle path or version prefix, in longest-first
+    # order, so a bare base URL is left behind.
+    for suffix in (
+        "/gateway/v1/x402/settle",
+        "/v1/x402/settle",
+        "/x402/settle",
+        "/gateway/v1",
+        "/v1",
+    ):
+        if raw.endswith(suffix):
+            raw = raw[: -len(suffix)]
+            break
 
-    # Backward-compatible handling for the repository's former `.../v1` default.
-    if raw.endswith("/v1/x402/settle"):
-        raw = raw[: -len("/v1/x402/settle")]
-    elif raw.endswith("/v1"):
-        raw = raw[: -len("/v1")]
-    elif raw.endswith("/x402/settle"):
-        raw = raw[: -len("/x402/settle")]
-
-    return f"{raw}/gateway/v1/x402/settle"
+    return f"{raw.rstrip('/')}/v1/x402/settle"
 
 
 def _resolve_chain_config(network_or_chain: str) -> dict[str, Any]:

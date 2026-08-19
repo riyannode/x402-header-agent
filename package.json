@@ -35,13 +35,13 @@
     "example:batch": "tsx --env-file=.env examples/batch-buyer.ts"
   },
   "dependencies": {
-    "@circle-fin/developer-controlled-wallets": "^10.7.1",
-    "@circle-fin/x402-batching": "^3.2.0",
-    "@x402/core": "^2.17.0",
-    "@x402/evm": "^2.17.0",
-    "viem": "^2.53.1",
-    "zod": "^3.25.0",
-    "express": "^4.18.0"
+    "@circle-fin/developer-controlled-wallets": "^10.8.0",
+    "@circle-fin/x402-batching": "^3.3.0",
+    "@x402/core": "^2.22.0",
+    "@x402/evm": "^2.22.0",
+    "express": "^4.18.0",
+    "viem": "^2.55.18",
+    "zod": "^3.25.0"
   },
   "peerDependencies": {
     "@langchain/core": ">=0.3.0"

@@ -1,4 +1,4 @@
-import { BatchEvmScheme, CHAIN_CONFIGS, arcPrivateMainnetHeaders, type SupportedChainName } from "@circle-fin/x402-batching/client";
+import { BatchEvmScheme, CHAIN_CONFIGS, type SupportedChainName } from "@circle-fin/x402-batching/client";
 import type { HookSettleResponse } from "@circle-fin/x402-batching";
 import { randomUUID } from "node:crypto";
 import { createPublicClient, erc20Abi, formatUnits, http, parseUnits, type Address } from "viem";
@@ -23,6 +23,16 @@ import { parsePaymentUrl } from "../utils/url.js";
 const GATEWAY_API_TESTNET = "https://gateway-api-testnet.circle.com/v1";
 const GATEWAY_API_MAINNET = "https://gateway-api.circle.com/v1";
 const MAX_PAYMENT_HEADER_BYTES = 64 * 1024;
+
+/**
+ * Header that opts an Arc mainnet caller into Circle's private-mainnet preview.
+ *
+ * `@circle-fin/x402-batching` exported `ARC_PRIVATE_MAINNET_HEADER` /
+ * `arcPrivateMainnetHeaders()` up to 3.2.x and dropped both in 3.3.0 in favour
+ * of a generic `headers` config option. We keep the constant locally so the
+ * buyer behaves identically on both versions.
+ */
+const ARC_PRIVATE_MAINNET_HEADER = "X-ARC-PRIVATE-MAINNET-ENABLED";
 
 function randomId(prefix: string): string {
   return `${prefix}_${randomUUID()}`;
@@ -167,7 +177,7 @@ export class BuyerBatchAgent {
   }
 
   private gatewayApiHeaders(): Record<string, string> {
-    return arcPrivateMainnetHeaders(this.arcPrivateMainnet);
+    return this.arcPrivateMainnet ? { [ARC_PRIVATE_MAINNET_HEADER]: "true" } : {};
   }
 
   private expectedNetwork(): string {
